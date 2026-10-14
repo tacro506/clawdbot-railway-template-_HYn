@@ -1503,12 +1503,19 @@ server.on("upgrade", async (req, socket, head) => {
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 
-process.on("SIGTERM", () => {
-  // Best-effort shutdown
-  try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
-  } catch {
-    // ignore
+process.on("SIGTERM", async () => {
+  // Wait for the gateway to exit before we do: a gateway killed mid-shutdown
+  // leaves its state owner lease behind, and the next gateway can't start
+  // until it expires (5 min). Needs Railway draining time (railway.toml).
+  const proc = gatewayProc;
+  if (proc) {
+    const exited = new Promise((resolve) => proc.once("exit", resolve));
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+    await Promise.race([exited, sleep(25_000)]);
   }
 
   // Stop accepting new connections; allow in-flight requests to complete briefly.

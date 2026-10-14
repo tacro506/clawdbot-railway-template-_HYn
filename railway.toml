@@ -5,6 +5,9 @@ builder = "dockerfile"
 healthcheckPath = "/setup/healthz"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
+# Time between SIGTERM and SIGKILL so the gateway can release its state lease
+# (otherwise the next deploy's gateway waits up to 5 minutes to start).
+drainingSeconds = 30
 
 # Require a persistent volume mounted at /data (Railway).
 requiredMountPath = "/data"
