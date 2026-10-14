@@ -77,6 +77,8 @@ RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"'
   && chmod +x /usr/local/bin/openclaw
 
 COPY src ./src
+# Pull the Troy workout agent's code from GitHub onto /data at each start.
+COPY scripts/troy-sync.mjs ./scripts/troy-sync.mjs
 
 # The wrapper listens on $PORT.
 # IMPORTANT: Do not set a default PORT here.
@@ -86,4 +88,5 @@ EXPOSE 8080
 
 # Ensure PID 1 reaps zombies and forwards signals.
 ENTRYPOINT ["tini", "--"]
-CMD ["node", "src/server.js"]
+# troy-sync is best effort; the wrapper starts either way.
+CMD ["sh", "-c", "node scripts/troy-sync.mjs; exec node src/server.js"]
