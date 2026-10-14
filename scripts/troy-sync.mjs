@@ -22,6 +22,9 @@ const DATA_ROOT = process.env.TROY_DATA_ROOT || "/data";
 const PLUGIN_DIR = path.join(DATA_ROOT, "plugins/troy-buttons");
 const BACKUP_ROOT = path.join(DATA_ROOT, "backup-sync");
 const KEEP_BACKUPS = 5;
+// Bump when this script starts installing differently, so the next start
+// re-installs even if the repo commit is unchanged.
+const SYNC_VERSION = 2;
 const STATUS_FILE = path.join(DATA_ROOT, "troy-sync.json");
 const PYTHON = process.env.TROY_PYTHON || "python3";
 // Read-only GitHub token (fine-grained, Contents: read) -- needed while the
@@ -30,8 +33,9 @@ const TOKEN = process.env.TROY_GITHUB_TOKEN?.trim();
 // Testing aid: install from this local checkout instead of downloading.
 const SRC_DIR = process.env.TROY_SRC_DIR;
 
-// [path in the repo, destination on the volume]
-const FILES = [
+// [path in the repo, destination on the volume]. The repo's own
+// deploy/sync-files.json overrides this list when present.
+const DEFAULT_FILES = [
   ["skills/workout-tracker/log.py", path.join(WS, "skills/workout-tracker/log.py")],
   ["skills/workout-tracker/SKILL.md", path.join(WS, "skills/workout-tracker/SKILL.md")],
   ["workspace/AGENTS.md", path.join(WS, "AGENTS.md")],
@@ -42,6 +46,25 @@ const FILES = [
 ];
 
 const log = (msg) => console.log(`[troy-sync] ${msg}`);
+
+// Read deploy/sync-files.json ({"files": {"repo/path": "{workspace}/..."}}).
+// Destinations must stay inside the volume and never be logged data.
+function resolveFiles(src) {
+  const manifest = path.join(src, "deploy/sync-files.json");
+  if (!fs.existsSync(manifest)) return DEFAULT_FILES;
+  const { files } = JSON.parse(fs.readFileSync(manifest, "utf8"));
+  const out = [];
+  for (const [rel, template] of Object.entries(files)) {
+    const dest = path.resolve(template.replace("{workspace}", WS).replace("{data}", DATA_ROOT));
+    const inside = [WS, DATA_ROOT].some((root) => dest.startsWith(path.resolve(root) + path.sep));
+    if (!inside || rel.includes("..") || /\.jsonl$|session\.json$/.test(dest)) {
+      log(`ignoring unsafe sync entry ${rel} -> ${template}`);
+      continue;
+    }
+    out.push([rel, dest]);
+  }
+  return out;
+}
 
 function githubHeaders(accept) {
   return { Accept: accept, "User-Agent": "troy-sync", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) };
@@ -81,15 +104,17 @@ async function download(sha, dir) {
 
 function runTests(src) {
   const opts = { cwd: src, stdio: "pipe", timeout: 180000, encoding: "utf8", env: { ...process.env, TROY_PYTHON: PYTHON } };
-  execFileSync(PYTHON, ["tests/test_log.py"], opts);
+  const tests = fs.readdirSync(path.join(src, "tests")).filter((f) => /^test_.*\.py$/.test(f)).sort();
+  for (const t of tests) execFileSync(PYTHON, [path.join("tests", t)], opts);
   if (fs.existsSync(path.join(src, "plugins/troy-buttons/test.mjs"))) {
     execFileSync(process.execPath, ["plugins/troy-buttons/test.mjs"], opts);
   }
 }
 
-function backup(stamp) {
+function backup(stamp, files) {
   const dir = path.join(BACKUP_ROOT, stamp);
-  for (const [, dest] of FILES) {
+  fs.mkdirSync(BACKUP_ROOT, { recursive: true });
+  for (const [, dest] of files) {
     if (!fs.existsSync(dest)) continue;
     const to = path.join(dir, path.relative(DATA_ROOT, dest));
     fs.mkdirSync(path.dirname(to), { recursive: true });
@@ -101,8 +126,8 @@ function backup(stamp) {
   }
 }
 
-function install(src) {
-  for (const [rel, dest] of FILES) {
+function install(src, files) {
+  for (const [rel, dest] of files) {
     const from = path.join(src, rel);
     if (!fs.existsSync(from)) {
       log(`skipping ${rel} (not in repo)`);
@@ -139,7 +164,8 @@ async function main() {
 
   const sha = SRC_DIR ? "local" : await latestSha();
   const status = readStatus();
-  if (status.sha === sha && FILES.every(([, dest]) => fs.existsSync(dest))) {
+  const installed = status.files || DEFAULT_FILES.map(([, dest]) => dest);
+  if (status.sha === sha && status.syncVersion === SYNC_VERSION && installed.every((dest) => fs.existsSync(dest))) {
     log(`up to date at ${sha.slice(0, 7)}`);
     ensurePlugin();
     return;
@@ -155,10 +181,13 @@ async function main() {
       log(String(error.stdout || "").slice(-1500) + String(error.stderr || "").slice(-1500));
       return;
     }
+    const files = resolveFiles(src);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    backup(stamp);
-    install(src);
-    fs.writeFileSync(STATUS_FILE, JSON.stringify({ sha, ref: REF, repo: REPO, syncedAt: new Date().toISOString(), backup: stamp }, null, 1));
+    backup(stamp, files);
+    install(src, files);
+    fs.writeFileSync(STATUS_FILE, JSON.stringify({
+      sha, syncVersion: SYNC_VERSION, ref: REF, repo: REPO, syncedAt: new Date().toISOString(), backup: stamp, files: files.map(([, dest]) => dest),
+    }, null, 1));
     log(`installed ${REPO}@${sha.slice(0, 7)} (was ${status.sha ? status.sha.slice(0, 7) : "unsynced"})`);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

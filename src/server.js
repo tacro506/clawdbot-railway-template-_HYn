@@ -257,6 +257,18 @@ async function ensureGatewayRunning() {
   return { ok: true };
 }
 
+// Optional operator hook that needs a running gateway (e.g. registering cron
+// jobs). Counterpart of bootstrap.sh, which runs before the gateway starts.
+async function runPostStartHook() {
+  const hookPath = path.join(WORKSPACE_DIR, "post-start.sh");
+  if (!fs.existsSync(hookPath)) return;
+  console.log(`[wrapper] running post-start hook: ${hookPath}`);
+  const r = await runCmd("bash", [hookPath], { timeoutMs: 5 * 60 * 1000 });
+  const out = redactSecrets(r.output || "").trim();
+  if (out) console.log(out);
+  console.log(`[wrapper] post-start hook exited code=${r.code}`);
+}
+
 async function restartGateway() {
   if (gatewayProc) {
     try {
@@ -1458,6 +1470,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       try {
         await ensureGatewayRunning();
         console.log("[wrapper] gateway ready");
+        await runPostStartHook();
         break;
       } catch (err) {
         if (Date.now() > deadline) {
