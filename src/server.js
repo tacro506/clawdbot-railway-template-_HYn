@@ -1448,13 +1448,25 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 
   // Auto-start the gateway if already configured so polling channels (Telegram/Discord/etc.)
   // work even if nobody visits the web UI.
+  // Keep retrying for a while: after a redeploy or restart the previous
+  // container's gateway owner lease can stay "active" for up to 5 minutes
+  // (OpenClaw's lease TTL), and the gateway refuses to start until it expires.
   if (isConfigured()) {
     console.log("[wrapper] config detected; starting gateway...");
-    try {
-      await ensureGatewayRunning();
-      console.log("[wrapper] gateway ready");
-    } catch (err) {
-      console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
+    const deadline = Date.now() + 8 * 60 * 1000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await ensureGatewayRunning();
+        console.log("[wrapper] gateway ready");
+        break;
+      } catch (err) {
+        if (Date.now() > deadline) {
+          console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
+          break;
+        }
+        console.warn(`[wrapper] gateway start attempt ${attempt} failed (${String(err)}); retrying in 30s`);
+        await sleep(30_000);
+      }
     }
   }
 });
